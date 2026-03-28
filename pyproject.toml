@@ -1,0 +1,9 @@
+[project]
+name = "unfolds"
+version = "0.1.0"
+description = "Leakage-free experiment framework: validation, sanctified holdout, cascades"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21", "scipy>=1.7", "scikit-learn>=1.0"]
+
+[tool.setuptools.packages.find]
+include = ["unfolds*"]
