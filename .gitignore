@@ -5,6 +5,7 @@ dist/
 build/
 artifacts/
 data/drugcomb/
+data/metallic-glass/
 .venv-drugcomb/
 .venv/
 .DS_Store

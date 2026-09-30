@@ -50,6 +50,28 @@ illustrate this construction, not a universal performance gap.
 - [Run the optional audit on real DrugComb data](examples/drugcomb/README.md),
   or inspect the original research scripts there.
 
+## Try a materials-research workflow
+
+The [metallic-glass example](examples/metallic_glass/README.md) shows the other
+side of unfolds: making an experiment convenient to build and repeat. Predict
+glass-transition temperature from alloy composition, compare a chemistry-routed
+neural ensemble against a flat ensemble, ridge regression, and boosted trees,
+then inspect the saved results and models.
+
+```bash
+pip install -r examples/metallic_glass/requirements.txt
+python -m examples.metallic_glass.prepare
+python -m examples.metallic_glass.benchmark --quick
+```
+
+Preparation downloads a pinned 2.8 MB archive and produces 838 unique
+compositions. Quick mode runs in seconds on the reference machine. The
+[benchmark](examples/metallic_glass/benchmark.py) supplies a loader, model
+factories, and a routing rule; `Research` supplies shared splits, cross-validation,
+comparison tables, CLI flags, run history, and model snapshots. Boosted trees
+are included as a strong baseline: the example demonstrates the workflow,
+without requiring the custom model to win.
+
 ## Why this exists
 
 ML experiment code can leak information from test data into training,

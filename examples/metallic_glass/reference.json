@@ -1,0 +1,99 @@
+{
+  "mode": "full",
+  "elapsed_seconds": 31.356385166996915,
+  "python": "3.10.2",
+  "versions": {
+    "numpy": "2.2.6",
+    "scipy": "1.15.3",
+    "scikit_learn": "1.7.2",
+    "unfolds": "0.1.0"
+  },
+  "data": {
+    "raw_rows": 9894,
+    "labelled_rows": 843,
+    "unique_compositions": 838,
+    "merged_rows": 5,
+    "composition_groups_with_different_targets": 0,
+    "feature_count": 82,
+    "source": "https://github.com/ZHOU-Ziqing/ML_Metallicglass_GFA",
+    "revision": "54bceddee4980217ea55998da0ee56272a81b1bf",
+    "url": "https://raw.githubusercontent.com/ZHOU-Ziqing/ML_Metallicglass_GFA/54bceddee4980217ea55998da0ee56272a81b1bf/descriptors.zip",
+    "archive_sha256": "d40e8f8d490af41b4daa7d81f87ad7085ef3e96b1e363100774365a743bfc129",
+    "workbook_sha256": {
+      "descriptors/Final_dataset_all_2.xlsx": "0051284814a41f281f2635d1421551802624e346e0af9a35548b5c7b3b6a4f55",
+      "descriptors/properties.xlsx": "41c9286e37236ec0af6f8996a95b5b019235e30d3d16d683ef96e04c20cb289a"
+    },
+    "features_sha256": "3bc1352972e38a9627b3dd0d5197c2ecb9b951d6e5314aede7b66d37d904437a",
+    "preparation_sha256": "75ec52338e0521aa5041582b9e0bc53da6954c54fac08836bf8353921f5a4e1b",
+    "versions": {
+      "numpy": "2.2.6",
+      "pandas": "2.2.3",
+      "openpyxl": "3.1.5"
+    }
+  },
+  "benchmark_sha256": "7f5cce45c1f7676e734940b794c7f11ae80269867ecfc5b1417153684e7d7555",
+  "run": {
+    "timestamp": "2026-09-30T09:33:42.627769+00:00",
+    "name": "Metallic-glass Tg (K)",
+    "config": {
+      "seed": 42,
+      "k": 5,
+      "sanctified_fraction": 0.15,
+      "dedup": null,
+      "brackets": null
+    },
+    "quick": false,
+    "n_samples": 838,
+    "n_features": 82,
+    "n_dev": 717,
+    "n_sanctified": 121,
+    "experiments": {
+      "ridge": {
+        "dev_mae": 26.347246993606557,
+        "dev_mae_std": 0.9775181551583747,
+        "dev_r2": 0.9575499856568019,
+        "dev_r2_std": 0.004499155474829145,
+        "dev_rmse": 35.410963698111274,
+        "sanctified_mae": 28.11842631895014,
+        "sanctified_r2": 0.9364735042889892,
+        "sanctified_rmse": 43.11340570704725,
+        "id": "ad6c187a"
+      },
+      "flat_ensemble": {
+        "dev_mae": 18.812583562804775,
+        "dev_mae_std": 3.026946357484101,
+        "dev_r2": 0.964051619423531,
+        "dev_r2_std": 0.01243707865388677,
+        "dev_rmse": 32.41112686544692,
+        "sanctified_mae": 20.45583805293402,
+        "sanctified_r2": 0.9596903557269171,
+        "sanctified_rmse": 34.34308969634688,
+        "id": "ab4ffd30"
+      },
+      "chemistry_cascade": {
+        "dev_mae": 15.941672375157273,
+        "dev_mae_std": 1.9759335394114128,
+        "dev_r2": 0.9698036945018768,
+        "dev_r2_std": 0.014360744137678634,
+        "dev_rmse": 29.23245896352244,
+        "sanctified_mae": 15.265277378193458,
+        "sanctified_r2": 0.9677021308853897,
+        "sanctified_rmse": 30.741270787932443,
+        "id": "57867090"
+      },
+      "boosted_trees": {
+        "dev_mae": 13.169061343588982,
+        "dev_mae_std": 1.62268735007532,
+        "dev_r2": 0.9833402716464441,
+        "dev_r2_std": 0.00493835424584883,
+        "dev_rmse": 22.005242661684672,
+        "sanctified_mae": 14.46374583140011,
+        "sanctified_r2": 0.9725560464829321,
+        "sanctified_rmse": 28.33728374783074,
+        "id": "e76e51ee"
+      }
+    },
+    "elapsed_s": 31.24
+  },
+  "unfolds_release_commit": "b70ab7060b9645d1f51351de5d41ee4796cac639"
+}
