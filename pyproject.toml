@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unfolds"
+version = "0.1.0"
+description = "ML experiment framework with leakage guardrails: validation, sanctified holdout, cascades"
+readme = "README.md"
+license = "CC-BY-4.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21", "scipy>=1.7", "scikit-learn>=1.0"]
+
+[project.urls]
+Repository = "https://github.com/JulienRibecco/unfolds"
+Issues = "https://github.com/JulienRibecco/unfolds/issues"
+
+[tool.setuptools.packages.find]
+include = ["unfolds*"]

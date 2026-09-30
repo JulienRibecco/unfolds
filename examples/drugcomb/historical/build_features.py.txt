@@ -1,0 +1,438 @@
+"""Build combined drug-pair + gene expression feature matrix for synergy prediction.
+
+Combines:
+  - RDKit 2D descriptors for Drug1 (prefixed drug1_*)
+  - RDKit 2D descriptors for Drug2 (prefixed drug2_*)
+  - Top-variance gene expression per cell line (from GDSC2 via TDC)
+
+Each row is a (drug1, drug2, cell_line) triple.
+Target: Synergy_Bliss score (centered ~0, positive = synergistic).
+
+Gene expression is sourced from GDSC2 (same TDC ecosystem), matched by cell
+line name. Cell lines without expression are dropped.
+
+Output: data/drug-combination/combined.npz
+
+Usage:
+    python research/drug-combination/build_features.py
+    python research/drug-combination/build_features.py --top-genes 200
+    python research/drug-combination/build_features.py --target Synergy_ZIP
+"""
+
+import argparse
+import os
+
+import numpy as np
+
+def _repo_root():
+    """Find repo root by walking up to setup.py."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    while not os.path.exists(os.path.join(d, 'setup.py')):
+        d = os.path.dirname(d)
+    return d
+
+DATA_DIR = os.path.join(_repo_root(), 'data', 'drug-combination')
+
+
+# ── Cell line name mapping (DrugComb name → GDSC2 name) ──────────────────────
+# DrugComb uses NCI-60 naming conventions; GDSC2 uses Sanger/CCLE conventions.
+# Exact matches are auto-detected; these are the manual corrections.
+_NAME_MAP = {
+    'OVCAR3': 'OVCAR-3',
+    'RXF 393': 'RXF393',
+    'SF-268': 'SF268',
+    'SF-539': 'SF539',
+    'SW-620': 'SW620',
+    'T-47D': 'T47D',
+    'TK-10': 'TK10',
+    'UACC62': 'UACC-62',
+    'COLO 205': 'COLO-205',
+    'HCC-2998': 'HCC2998',
+    'HCT116': 'HCT-116',
+    'HL-60(TB)': 'HL-60',
+    'HS 578T': 'Hs-578-T',
+    'HT29': 'HT-29',
+    'IGROV1': 'IGROV-1',
+    'LOX IMVI': 'LOXIMVI',
+    'NCIH23': 'NCI-H23',
+}
+
+
+def load_drugcomb():
+    """Load DrugComb synergy data via TDC."""
+    from tdc.multi_pred import DrugSyn
+
+    print("Loading DrugComb via TDC...")
+    data = DrugSyn(name='DrugComb')
+    df = data.get_data()
+    print(f"  {len(df)} triples, "
+          f"{df['Drug1_ID'].nunique()}+{df['Drug2_ID'].nunique()} drugs, "
+          f"{df['Cell_Line_ID'].nunique()} cell lines")
+    return df
+
+
+def load_gdsc2_expression():
+    """Load gene expression from GDSC2 via TDC.
+
+    Returns:
+        cl_expr: dict mapping cell_line_name → expression vector (all genes)
+        gene_names: list of gene symbols
+    """
+    from tdc.multi_pred import DrugRes
+
+    print("Loading GDSC2 expression...")
+    data = DrugRes(name='GDSC2')
+    df = data.get_data()
+    gene_names = data.get_gene_symbols()
+
+    unique_cl = df.drop_duplicates('Cell Line_ID')
+    cl_expr = {}
+    for _, row in unique_cl.iterrows():
+        cl_expr[row['Cell Line_ID']] = np.array(row['Cell Line'], dtype=np.float64)
+
+    print(f"  {len(cl_expr)} cell lines, {len(gene_names)} genes")
+    return cl_expr, gene_names
+
+
+def match_cell_lines(combo_cls, gdsc_expr):
+    """Match DrugComb cell line names to GDSC2 expression.
+
+    Returns dict mapping combo_name → gdsc_name for matched lines.
+    """
+    matched = {}
+    for cl in combo_cls:
+        if cl in gdsc_expr:
+            matched[cl] = cl
+        elif cl in _NAME_MAP and _NAME_MAP[cl] in gdsc_expr:
+            matched[cl] = _NAME_MAP[cl]
+
+    return matched
+
+
+def compute_drug_descriptors(smiles_list, drug_ids, prefix):
+    """Compute RDKit 2D descriptors for a list of drugs.
+
+    Args:
+        smiles_list: list of SMILES strings (one per unique drug)
+        drug_ids: list of drug IDs (parallel to smiles_list)
+        prefix: 'drug1' or 'drug2' for naming
+
+    Returns:
+        desc_matrix: (n_drugs, n_desc) float64
+        desc_names: list of prefixed descriptor names
+        id_to_idx: dict mapping drug_id → row index
+    """
+    from rdkit import Chem, RDLogger
+    from rdkit.Chem import Descriptors
+
+    RDLogger.logger().setLevel(RDLogger.ERROR)
+
+    n_drugs = len(smiles_list)
+
+    # Get descriptor names from first valid molecule
+    for smi in smiles_list:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is not None:
+            all_desc_names = list(Descriptors.CalcMolDescriptors(mol).keys())
+            break
+
+    D = np.empty((n_drugs, len(all_desc_names)), dtype=np.float64)
+    n_failed = 0
+
+    for i, smi in enumerate(smiles_list):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            D[i, :] = np.nan
+            n_failed += 1
+            continue
+        dd = Descriptors.CalcMolDescriptors(mol)
+        for j, name in enumerate(all_desc_names):
+            val = dd[name]
+            D[i, j] = float(val) if val is not None else np.nan
+
+    if n_failed:
+        print(f"  WARNING: {n_failed}/{n_drugs} drugs failed to parse")
+
+    # Drop bad columns
+    has_inf = np.isinf(D).any(axis=0)
+    all_nan = np.isnan(D).all(axis=0)
+    with np.errstate(invalid='ignore'):
+        stds = np.nanstd(D, axis=0)
+    is_const = stds == 0
+    drop = has_inf | all_nan | is_const
+
+    keep_idx = np.where(~drop)[0]
+    D_clean = D[:, keep_idx]
+    clean_names = [f"{prefix}_{all_desc_names[j]}" for j in keep_idx]
+
+    # Impute remaining NaN with median
+    nan_count = np.isnan(D_clean).sum()
+    if nan_count > 0:
+        medians = np.nanmedian(D_clean, axis=0)
+        for j in range(D_clean.shape[1]):
+            mask = np.isnan(D_clean[:, j])
+            if mask.any():
+                D_clean[mask, j] = medians[j]
+
+    print(f"  {prefix}: {n_drugs} drugs → {D_clean.shape[1]} descriptors "
+          f"(dropped {drop.sum()}, imputed {nan_count} NaN)")
+
+    id_to_idx = {did: i for i, did in enumerate(drug_ids)}
+    return D_clean, clean_names, id_to_idx
+
+
+def build_combined(df, cl_match, gdsc_expr, gene_names,
+                   drug1_desc, drug1_names, drug1_id_to_idx,
+                   drug2_desc, drug2_names, drug2_id_to_idx,
+                   top_genes=200, target_col='Synergy_Bliss'):
+    """Build combined feature matrix.
+
+    Each row = [drug1_descriptors, drug2_descriptors, gene_expression_filtered].
+    """
+    # Filter to matched cell lines
+    keep_mask = df['Cell_Line_ID'].isin(set(cl_match.keys()))
+    df_keep = df[keep_mask].reset_index(drop=True)
+    n = len(df_keep)
+    print(f"  Kept {n}/{len(df)} pairs ({len(cl_match)} cell lines)")
+
+    # Variance filter genes on matched cell lines
+    print("  Computing gene variance on matched cell lines...")
+    cl_vectors = []
+    for combo_name in cl_match:
+        gdsc_name = cl_match[combo_name]
+        cl_vectors.append(gdsc_expr[gdsc_name])
+    cl_matrix = np.stack(cl_vectors)
+    variances = np.var(cl_matrix, axis=0)
+    top_idx = np.sort(np.argsort(variances)[-top_genes:])
+    gene_feat_names = [gene_names[i] for i in top_idx]
+    del cl_matrix
+    print(f"  Genes: {len(gene_names)} → {len(gene_feat_names)} "
+          f"(top {top_genes} by variance)")
+
+    # Build expression lookup for matched cell lines (filtered genes only)
+    cl_expr_filtered = {}
+    for combo_name, gdsc_name in cl_match.items():
+        cl_expr_filtered[combo_name] = gdsc_expr[gdsc_name][top_idx]
+
+    # Assemble feature matrix
+    print("  Assembling feature matrix...")
+    n_d1 = drug1_desc.shape[1]
+    n_d2 = drug2_desc.shape[1]
+    n_g = top_genes
+    X = np.empty((n, n_d1 + n_d2 + n_g), dtype=np.float64)
+
+    for i in range(n):
+        row = df_keep.iloc[i]
+        # Drug descriptors
+        X[i, :n_d1] = drug1_desc[drug1_id_to_idx[row['Drug1_ID']]]
+        X[i, n_d1:n_d1+n_d2] = drug2_desc[drug2_id_to_idx[row['Drug2_ID']]]
+        # Gene expression
+        X[i, n_d1+n_d2:] = cl_expr_filtered[row['Cell_Line_ID']]
+        if i % 50000 == 0 and i > 0:
+            print(f"    {i}/{n}...")
+
+    y = df_keep[target_col].values.astype(np.float64)
+    feature_names = drug1_names + drug2_names + gene_feat_names
+
+    # Cell line and drug-pair IDs for grouping
+    cell_line_ids = df_keep['Cell_Line_ID'].values
+    unique_cl = sorted(set(cell_line_ids))
+    cl_to_int = {cl: i for i, cl in enumerate(unique_cl)}
+    cl_ints = np.array([cl_to_int[cl] for cl in cell_line_ids])
+
+    # Encode drug pairs as integers (for potential routing)
+    drug_pair_ids = (df_keep['Drug1_ID'] + '|||' + df_keep['Drug2_ID']).values
+    unique_pairs = sorted(set(drug_pair_ids))
+    pair_to_int = {p: i for i, p in enumerate(unique_pairs)}
+    pair_ints = np.array([pair_to_int[p] for p in drug_pair_ids])
+
+    print(f"  Combined: {X.shape[0]} rows × {X.shape[1]} features "
+          f"({n_d1} drug1 + {n_d2} drug2 + {n_g} genes)")
+    print(f"  Target ({target_col}): [{y.min():.2f}, {y.max():.2f}], "
+          f"mean={y.mean():.2f}, std={y.std():.2f}")
+    print(f"  Cell lines: {len(unique_cl)}, Drug pairs: {len(unique_pairs)}")
+
+    return (X, y, feature_names, cl_ints, pair_ints,
+            drug1_names, drug2_names, gene_feat_names)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Build drug combination synergy feature matrix")
+    parser.add_argument('--top-genes', type=int, default=200,
+                        help='Number of top-variance genes to keep')
+    parser.add_argument('--target', default='Synergy_Bliss',
+                        choices=['Synergy_Bliss', 'Synergy_ZIP',
+                                 'Synergy_Loewe', 'Synergy_HSA', 'CSS'],
+                        help='Synergy score to predict')
+    args = parser.parse_args()
+
+    # Load data sources
+    df = load_drugcomb()
+    gdsc_expr, gene_names = load_gdsc2_expression()
+
+    # Match cell lines
+    combo_cls = sorted(df['Cell_Line_ID'].unique())
+    cl_match = match_cell_lines(combo_cls, gdsc_expr)
+    n_miss = len(combo_cls) - len(cl_match)
+    print(f"  Cell line matching: {len(cl_match)}/{len(combo_cls)} "
+          f"({n_miss} unmatched, dropped)")
+
+    # Drug descriptors — compute for all unique drugs across both positions
+    # Drug can appear in either Drug1 or Drug2, so we collect all unique SMILES
+    all_drugs = {}  # drug_id → smiles
+    for _, row in df.drop_duplicates('Drug1_ID')[['Drug1_ID', 'Drug1']].iterrows():
+        all_drugs[row['Drug1_ID']] = row['Drug1']
+    for _, row in df.drop_duplicates('Drug2_ID')[['Drug2_ID', 'Drug2']].iterrows():
+        all_drugs[row['Drug2_ID']] = row['Drug2']
+
+    drug_ids_sorted = sorted(all_drugs.keys())
+    smiles_sorted = [all_drugs[d] for d in drug_ids_sorted]
+
+    # Compute descriptors once, use for both drug1 and drug2
+    print("\nComputing RDKit descriptors (shared pool)...")
+    from rdkit import Chem, RDLogger
+    from rdkit.Chem import Descriptors
+    RDLogger.logger().setLevel(RDLogger.ERROR)
+
+    mol0 = Chem.MolFromSmiles(smiles_sorted[0])
+    all_desc_names = list(Descriptors.CalcMolDescriptors(mol0).keys())
+    n_all = len(drug_ids_sorted)
+
+    D = np.empty((n_all, len(all_desc_names)), dtype=np.float64)
+    n_failed = 0
+    for i, smi in enumerate(smiles_sorted):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            D[i, :] = np.nan
+            n_failed += 1
+            continue
+        dd = Descriptors.CalcMolDescriptors(mol)
+        for j, name in enumerate(all_desc_names):
+            val = dd[name]
+            D[i, j] = float(val) if val is not None else np.nan
+
+    if n_failed:
+        print(f"  WARNING: {n_failed}/{n_all} drugs failed to parse")
+
+    # Clean descriptors
+    has_inf = np.isinf(D).any(axis=0)
+    all_nan = np.isnan(D).all(axis=0)
+    with np.errstate(invalid='ignore'):
+        stds = np.nanstd(D, axis=0)
+    is_const = stds == 0
+    drop = has_inf | all_nan | is_const
+    keep_idx = np.where(~drop)[0]
+    D_clean = D[:, keep_idx]
+    clean_desc_names = [all_desc_names[j] for j in keep_idx]
+
+    nan_count = np.isnan(D_clean).sum()
+    if nan_count > 0:
+        medians = np.nanmedian(D_clean, axis=0)
+        for j in range(D_clean.shape[1]):
+            mask = np.isnan(D_clean[:, j])
+            if mask.any():
+                D_clean[mask, j] = medians[j]
+
+    id_to_idx = {did: i for i, did in enumerate(drug_ids_sorted)}
+    n_desc = D_clean.shape[1]
+    print(f"  {n_all} drugs → {n_desc} descriptors "
+          f"(dropped {drop.sum()}, imputed {nan_count} NaN)")
+
+    # Create drug1 and drug2 views with appropriate prefixes
+    drug1_names = [f"drug1_{n}" for n in clean_desc_names]
+    drug2_names = [f"drug2_{n}" for n in clean_desc_names]
+
+    # Build combined matrix
+    print("\nBuilding combined matrix...")
+
+    # Filter to matched cell lines
+    keep_mask = df['Cell_Line_ID'].isin(set(cl_match.keys()))
+    df_keep = df[keep_mask].reset_index(drop=True)
+    n = len(df_keep)
+    print(f"  Kept {n}/{len(df)} pairs ({len(cl_match)} cell lines)")
+
+    # Variance filter genes
+    print("  Computing gene variance on matched cell lines...")
+    cl_vectors = [gdsc_expr[cl_match[c]] for c in cl_match]
+    cl_matrix = np.stack(cl_vectors)
+    variances = np.var(cl_matrix, axis=0)
+    top_genes = args.top_genes
+    top_idx = np.sort(np.argsort(variances)[-top_genes:])
+    gene_feat_names = [gene_names[i] for i in top_idx]
+    del cl_matrix
+    print(f"  Genes: {len(gene_names)} → {len(gene_feat_names)} "
+          f"(top {top_genes} by variance)")
+
+    # Expression lookup (filtered genes)
+    cl_expr_filtered = {}
+    for combo_name, gdsc_name in cl_match.items():
+        cl_expr_filtered[combo_name] = gdsc_expr[gdsc_name][top_idx]
+
+    # Assemble
+    print("  Assembling feature matrix...")
+    n_g = top_genes
+    X = np.empty((n, n_desc + n_desc + n_g), dtype=np.float64)
+
+    for i in range(n):
+        row = df_keep.iloc[i]
+        idx1 = id_to_idx[row['Drug1_ID']]
+        idx2 = id_to_idx[row['Drug2_ID']]
+        X[i, :n_desc] = D_clean[idx1]
+        X[i, n_desc:2*n_desc] = D_clean[idx2]
+        X[i, 2*n_desc:] = cl_expr_filtered[row['Cell_Line_ID']]
+        if i % 50000 == 0 and i > 0:
+            print(f"    {i}/{n}...")
+
+    target_col = args.target
+    y = df_keep[target_col].values.astype(np.float64)
+    feature_names = drug1_names + drug2_names + gene_feat_names
+
+    # Cell line groups
+    cell_line_ids = df_keep['Cell_Line_ID'].values
+    unique_cl = sorted(set(cell_line_ids))
+    cl_to_int = {cl: i for i, cl in enumerate(unique_cl)}
+    cl_ints = np.array([cl_to_int[cl] for cl in cell_line_ids])
+
+    # Drug pair groups
+    drug_pair_ids = (df_keep['Drug1_ID'] + '|||' + df_keep['Drug2_ID']).values
+    unique_pairs = sorted(set(drug_pair_ids))
+    pair_to_int = {p: i for i, p in enumerate(unique_pairs)}
+    pair_ints = np.array([pair_to_int[p] for p in drug_pair_ids])
+
+    print(f"\n  Combined: {X.shape[0]} rows × {X.shape[1]} features "
+          f"({n_desc} drug1 + {n_desc} drug2 + {n_g} genes)")
+    print(f"  Target ({target_col}): [{y.min():.2f}, {y.max():.2f}], "
+          f"mean={y.mean():.2f}, std={y.std():.2f}")
+    print(f"  Cell lines: {len(unique_cl)}, Drug pairs: {len(unique_pairs)}")
+
+    # Drop NaN targets if any
+    nan_mask = np.isnan(y)
+    if nan_mask.any():
+        print(f"  Dropping {nan_mask.sum()} NaN targets")
+        X = X[~nan_mask]
+        y = y[~nan_mask]
+        cl_ints = cl_ints[~nan_mask]
+        pair_ints = pair_ints[~nan_mask]
+
+    # Save
+    os.makedirs(DATA_DIR, exist_ok=True)
+    out_path = os.path.join(DATA_DIR, 'combined.npz')
+    np.savez_compressed(
+        out_path,
+        X=X, y=y,
+        feature_names=np.array(feature_names),
+        drug1_names=np.array(drug1_names),
+        drug2_names=np.array(drug2_names),
+        gene_names=np.array(gene_feat_names),
+        cell_line_groups=cl_ints,
+        drug_pair_groups=pair_ints,
+        target_name=target_col,
+    )
+    print(f"\n  Saved: {out_path}")
+    fsize = os.path.getsize(out_path) / 1024 / 1024
+    print(f"  File size: {fsize:.1f} MB")
+
+
+if __name__ == "__main__":
+    main()

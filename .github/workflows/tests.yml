@@ -1,0 +1,54 @@
+name: Tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install .
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Test installed package outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import unittest
+          import unfolds
+
+          root = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          assert root not in Path(unfolds.__file__).resolve().parents
+          loader = unittest.TestLoader()
+          suite = unittest.TestSuite()
+          for pattern in ('test_data.py', 'test_experiment.py', 'test_invalid_splits.py',
+                          'test_stacking.py', 'test_model_correctness.py'):
+              suite.addTests(loader.discover(str(root / 'tests'), pattern=pattern))
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(not result.wasSuccessful())
+          PY
+
+  drugcomb-preparation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install optional preparation dependencies
+        run: python -m pip install . -r examples/drugcomb/requirements.txt
+      - name: Test preparation with tiny local fixtures
+        run: python -m unittest discover -s tests -p 'test_drugcomb_preparation.py' -v

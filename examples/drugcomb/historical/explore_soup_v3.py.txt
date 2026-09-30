@@ -1,0 +1,342 @@
+"""Soup v3: proper validation via X_val/y_val with cell-line-grouped split.
+
+The key fix: soup feature selection must score on held-out CELL LINES,
+not held-out rows. With 49 cell lines, random row splits leak because
+the same cell line appears in both train and val — soup learns cell-line
+fingerprints rather than drug-synergy features.
+
+Usage:
+    python research/drug-combination/explore_soup_v3.py
+    python research/drug-combination/explore_soup_v3.py --nsub 50000
+"""
+
+import argparse
+import os
+import time
+
+import numpy as np
+
+from signalfault.classify._data import fold_normalize
+from signalfault.classify._ridge import ridge_solve, ridge_predict
+from potage import SoupPipe, SoupConfig
+
+def _repo_root():
+    """Find repo root by walking up to setup.py."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    while not os.path.exists(os.path.join(d, 'setup.py')):
+        d = os.path.dirname(d)
+    return d
+
+DATA_DIR = os.path.join(_repo_root(), 'data', 'drug-combination')
+
+ALPHA = 10.0
+SEED = 42
+
+
+def load_data():
+    data = np.load(os.path.join(DATA_DIR, 'combined.npz'), allow_pickle=True)
+    X = data['X']
+    y = data['y']
+    fnames = list(data['feature_names'])
+    cl_groups = data['cell_line_groups']
+    stds = np.std(X, axis=0)
+    keep = stds > 0
+    if not keep.all():
+        X = X[:, keep]
+        fnames = [n for n, k in zip(fnames, keep) if k]
+    return X, y, np.array(fnames), cl_groups
+
+
+def grouped_split(X, y, cl_groups, val_fraction=0.25, seed=42):
+    """Split by cell line groups — no cell line in both train and val."""
+    rng = np.random.RandomState(seed)
+    unique_cls = np.unique(cl_groups)
+    rng.shuffle(unique_cls)
+    n_val_cls = max(1, int(len(unique_cls) * val_fraction))
+    val_cls = set(unique_cls[:n_val_cls])
+
+    val_mask = np.array([g in val_cls for g in cl_groups])
+    tr_mask = ~val_mask
+
+    print(f"  Grouped split: {tr_mask.sum()} train ({len(unique_cls)-n_val_cls} CLs), "
+          f"{val_mask.sum()} val ({n_val_cls} CLs)")
+    return tr_mask, val_mask
+
+
+def split_idx(fnames):
+    d1 = np.array([i for i, n in enumerate(fnames) if n.startswith('drug1_')])
+    d2 = np.array([i for i, n in enumerate(fnames) if n.startswith('drug2_')])
+    gene = np.array([i for i, n in enumerate(fnames)
+                     if not n.startswith('drug1_') and not n.startswith('drug2_')])
+    return d1, d2, gene
+
+
+def ridge_eval(X_tr, y_tr, X_te, y_te, alpha=ALPHA):
+    Xn_tr, Xn_te, _, _ = fold_normalize(X_tr, X_te)
+    w = ridge_solve(Xn_tr, y_tr, alpha)
+    pred = ridge_predict(Xn_te, w)
+    ss_res = np.sum((y_te - pred) ** 2)
+    ss_tot = np.sum((y_te - y_te.mean()) ** 2)
+    r2 = 1 - ss_res / ss_tot
+    mae = np.mean(np.abs(y_te - pred))
+    return r2, mae
+
+
+def print_fs(label, fs, max_show=8):
+    n = fs.X.shape[1]
+    print(f"\n  {label}: {n} features")
+    for name in fs.names[:max_show]:
+        print(f"    - {name}")
+    if n > max_show:
+        print(f"    ... ({n - max_show} more)")
+
+
+def run_soup(X_tr, y_tr, X_val, y_val, names, label, n_select=15):
+    """Run soup with proper val scoring.
+
+    For large datasets, FM is memory-limited. Use smaller FM inputs
+    (top 8 carriers × top 8 raw) to stay within budget.
+    """
+    print(f"\n{'='*60}")
+    print(f"  {label} ({X_tr.shape[1]} features, "
+          f"{X_tr.shape[0]} train, {X_val.shape[0]} val)")
+    print(f"{'='*60}")
+
+    ftypes = np.full(X_tr.shape[1], 'numeric', dtype='<U11')
+    pipe = SoupPipe(X_tr, y_tr, list(names),
+                    config=SoupConfig(),
+                    feature_types=ftypes,
+                    X_val=X_val, y_val=y_val,
+                    exclude_families={'reciprocal', 'power'},
+                    fold_eval_count=None)  # disabled — using explicit val
+
+    # Raw
+    fs_raw = pipe.raw(select=n_select)
+    print_fs("Raw", fs_raw)
+
+    # AM (self-pairs)
+    pipe.print_memory('am', fs_raw)
+    fs_am = pipe.am(fs_raw, select=n_select)
+    print_fs("AM", fs_am)
+
+    # Carriers — use smaller budget for FM input
+    n_fm_in = min(8, n_select)
+    fs_car = pipe.carriers(fs_raw, select=n_fm_in)
+    print_fs("Carriers", fs_car)
+
+    # FM with compact inputs
+    fs_raw_compact = pipe.select(fs_raw, select=n_fm_in)
+    pipe.print_memory('fm', fs_car, fs_raw_compact)
+    fs_fm = pipe.fm(fs_car, fs_raw_compact, select=n_select)
+    print_fs("FM", fs_fm)
+
+    # Fuse + final
+    fs_all = pipe.fuse(fs_raw, fs_am, fs_car, fs_fm)
+    fs_final = pipe.select(fs_all, select=n_select)
+    print_fs("Final", fs_final)
+
+    return pipe, fs_raw, fs_final
+
+
+def run_cross_soup(X_tr, y_tr, X_val, y_val, names, label, n_select=15):
+    """Run cross-domain soup with proper val."""
+    print(f"\n{'='*60}")
+    print(f"  {label} ({X_tr.shape[1]} features, "
+          f"{X_tr.shape[0]} train, {X_val.shape[0]} val)")
+    print(f"{'='*60}")
+
+    ftypes = np.full(X_tr.shape[1], 'numeric', dtype='<U11')
+    pipe = SoupPipe(X_tr, y_tr, list(names),
+                    config=SoupConfig(),
+                    feature_types=ftypes,
+                    X_val=X_val, y_val=y_val,
+                    exclude_families={'reciprocal', 'power'},
+                    fold_eval_count=None)
+
+    fs_raw = pipe.raw(select=n_select)
+    print_fs("Raw", fs_raw)
+
+    pipe.print_memory('am', fs_raw)
+    fs_am = pipe.am(fs_raw, select=n_select)
+    print_fs("AM (cross-products)", fs_am)
+
+    n_fm_in = min(8, n_select)
+    fs_car = pipe.carriers(fs_am, select=n_fm_in)
+    print_fs("Carriers on AM", fs_car)
+
+    fs_raw_compact = pipe.select(fs_raw, select=n_fm_in)
+    pipe.print_memory('fm', fs_car, fs_raw_compact)
+    fs_fm = pipe.fm(fs_car, fs_raw_compact, select=n_select)
+    print_fs("FM", fs_fm)
+
+    fs_all = pipe.fuse(fs_raw, fs_am, fs_car, fs_fm)
+    fs_final = pipe.select(fs_all, select=n_select * 2)
+    print_fs("Final", fs_final, max_show=15)
+
+    return pipe, fs_final
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--nsub', type=int, default=50000)
+    parser.add_argument('--nsel', type=int, default=15)
+    args = parser.parse_args()
+
+    N_SUB = args.nsub
+    N_SEL = args.nsel
+
+    print("Loading data...")
+    X, y, fnames, cl_groups = load_data()
+    d1_idx, d2_idx, gene_idx = split_idx(fnames)
+    print(f"  {len(X)} samples, {len(fnames)} features")
+    print(f"  drug1: {len(d1_idx)}, drug2: {len(d2_idx)}, genes: {len(gene_idx)}")
+
+    # Subsample (preserving group structure)
+    rng = np.random.RandomState(SEED)
+    idx = rng.permutation(len(X))[:N_SUB]
+    X, y, cl_groups = X[idx], y[idx], cl_groups[idx]
+    print(f"  Subsampled to {len(X)}, {len(np.unique(cl_groups))} cell lines")
+
+    # ── Cell-line-grouped train/val split ─────────────────────────
+    tr_mask, val_mask = grouped_split(X, y, cl_groups, val_fraction=0.25, seed=SEED)
+    X_tr, y_tr = X[tr_mask], y[tr_mask]
+    X_val, y_val = X[val_mask], y[val_mask]
+
+    # Final test set: another grouped split from train
+    tr_cl = np.unique(cl_groups[tr_mask])
+    rng2 = np.random.RandomState(SEED + 1)
+    rng2.shuffle(tr_cl)
+    n_test_cl = max(1, int(len(tr_cl) * 0.2))
+    test_cls = set(tr_cl[:n_test_cl])
+    test_mask_in_tr = np.array([cl_groups[tr_mask][i] in test_cls
+                                 for i in range(tr_mask.sum())])
+    X_test = X_tr[test_mask_in_tr]
+    y_test = y_tr[test_mask_in_tr]
+    X_tr = X_tr[~test_mask_in_tr]
+    y_tr = y_tr[~test_mask_in_tr]
+    print(f"  Final: {len(X_tr)} train, {len(X_val)} soup-val, {len(X_test)} test")
+
+    # ── Baselines ─────────────────────────────────────────────────
+    r2_base, mae_base = ridge_eval(X_tr, y_tr, X_test, y_test)
+    print(f"\n  Baseline (all {X_tr.shape[1]}): R²={r2_base:.4f}, MAE={mae_base:.3f}")
+
+    r2_val, _ = ridge_eval(X_tr, y_tr, X_val, y_val)
+    print(f"  Baseline on val: R²={r2_val:.4f}")
+
+    # ── DRUG1 SOUP (val-scored) ───────────────────────────────────
+    pipe_d1, d1_raw, d1_final = run_soup(
+        X_tr[:, d1_idx], y_tr,
+        X_val[:, d1_idx], y_val,
+        fnames[d1_idx], "Drug1 soup (val-scored)", N_SEL)
+
+    # ── DRUG2 SOUP (val-scored) ───────────────────────────────────
+    pipe_d2, d2_raw, d2_final = run_soup(
+        X_tr[:, d2_idx], y_tr,
+        X_val[:, d2_idx], y_val,
+        fnames[d2_idx], "Drug2 soup (val-scored)", N_SEL)
+
+    # ── GENE SOUP (val-scored) ────────────────────────────────────
+    pipe_gene, g_raw, g_final = run_soup(
+        X_tr[:, gene_idx], y_tr,
+        X_val[:, gene_idx], y_val,
+        fnames[gene_idx], "Gene soup (val-scored)", N_SEL)
+
+    # ── CROSS-DRUG (val-scored) ───────────────────────────────────
+    n_cross = min(10, d1_raw.X.shape[1], d2_raw.X.shape[1])
+    # Need to transform val through upstream raw stages first
+    d1_val_raw = pipe_d1.transform(X_val[:, d1_idx])
+    d2_val_raw = pipe_d2.transform(X_val[:, d2_idx])
+    # Use the raw features (first n_cross from each pipe's final = raw stage output)
+    # Actually pipe.transform gives final output. We need raw output.
+    # Simpler: recompute raw transforms on val manually by running a temp pipe.
+    # OR: build cross pipe with original features and let it do raw internally.
+    X_cross_tr = np.hstack([X_tr[:, d1_idx[:n_cross]], X_tr[:, d2_idx[:n_cross]]])
+    X_cross_val = np.hstack([X_val[:, d1_idx[:n_cross]], X_val[:, d2_idx[:n_cross]]])
+    cross_names = list(fnames[d1_idx[:n_cross]]) + list(fnames[d2_idx[:n_cross]])
+
+    pipe_cross, cross_final = run_cross_soup(
+        X_cross_tr, y_tr,
+        X_cross_val, y_val,
+        cross_names, "Cross-drug (val-scored)", N_SEL)
+
+    # ── DRUG×GENE (val-scored) ────────────────────────────────────
+    n_dg = min(8, len(d1_idx), len(d2_idx), len(gene_idx))
+    X_dg_tr = np.hstack([X_tr[:, d1_idx[:n_dg]], X_tr[:, d2_idx[:n_dg]],
+                          X_tr[:, gene_idx[:n_dg]]])
+    X_dg_val = np.hstack([X_val[:, d1_idx[:n_dg]], X_val[:, d2_idx[:n_dg]],
+                           X_val[:, gene_idx[:n_dg]]])
+    dg_names = (list(fnames[d1_idx[:n_dg]]) + list(fnames[d2_idx[:n_dg]]) +
+                list(fnames[gene_idx[:n_dg]]))
+
+    pipe_dg, dg_final = run_cross_soup(
+        X_dg_tr, y_tr,
+        X_dg_val, y_val,
+        dg_names, "Drug×Gene (val-scored)", N_SEL)
+
+    # ══════════════════════════════════════════════════════════════
+    # EVALUATION on held-out TEST set (different cell lines from both
+    # soup-train and soup-val)
+    # ══════════════════════════════════════════════════════════════
+    print(f"\n{'='*60}")
+    print(f"  EVALUATION on TEST ({len(X_test)} samples, held-out cell lines)")
+    print(f"{'='*60}")
+
+    soup_d1_tr = pipe_d1.transform(X_tr[:, d1_idx])
+    soup_d1_te = pipe_d1.transform(X_test[:, d1_idx])
+    soup_d2_tr = pipe_d2.transform(X_tr[:, d2_idx])
+    soup_d2_te = pipe_d2.transform(X_test[:, d2_idx])
+    soup_gene_tr = pipe_gene.transform(X_tr[:, gene_idx])
+    soup_gene_te = pipe_gene.transform(X_test[:, gene_idx])
+
+    X_cross_te = np.hstack([X_test[:, d1_idx[:n_cross]], X_test[:, d2_idx[:n_cross]]])
+    soup_cross_tr = pipe_cross.transform(X_cross_tr)
+    soup_cross_te = pipe_cross.transform(X_cross_te)
+
+    X_dg_te = np.hstack([X_test[:, d1_idx[:n_dg]], X_test[:, d2_idx[:n_dg]],
+                          X_test[:, gene_idx[:n_dg]]])
+    soup_dg_tr = pipe_dg.transform(X_dg_tr)
+    soup_dg_te = pipe_dg.transform(X_dg_te)
+
+    configs = [
+        ("baseline (raw only)",        X_tr, X_test),
+        ("+ drug1 soup",               np.hstack([X_tr, soup_d1_tr]),
+                                        np.hstack([X_test, soup_d1_te])),
+        ("+ drug2 soup",               np.hstack([X_tr, soup_d2_tr]),
+                                        np.hstack([X_test, soup_d2_te])),
+        ("+ drug1+drug2 soup",         np.hstack([X_tr, soup_d1_tr, soup_d2_tr]),
+                                        np.hstack([X_test, soup_d1_te, soup_d2_te])),
+        ("+ gene soup",                np.hstack([X_tr, soup_gene_tr]),
+                                        np.hstack([X_test, soup_gene_te])),
+        ("+ cross-drug",               np.hstack([X_tr, soup_cross_tr]),
+                                        np.hstack([X_test, soup_cross_te])),
+        ("+ drug×gene",                np.hstack([X_tr, soup_dg_tr]),
+                                        np.hstack([X_test, soup_dg_te])),
+        ("+ all domain soups",         np.hstack([X_tr, soup_d1_tr, soup_d2_tr,
+                                                   soup_gene_tr]),
+                                        np.hstack([X_test, soup_d1_te, soup_d2_te,
+                                                   soup_gene_te])),
+        ("+ all soups + cross",        np.hstack([X_tr, soup_d1_tr, soup_d2_tr,
+                                                   soup_gene_tr, soup_cross_tr,
+                                                   soup_dg_tr]),
+                                        np.hstack([X_test, soup_d1_te, soup_d2_te,
+                                                   soup_gene_te, soup_cross_te,
+                                                   soup_dg_te])),
+        ("soup only (no raw)",         np.hstack([soup_d1_tr, soup_d2_tr,
+                                                   soup_gene_tr, soup_cross_tr,
+                                                   soup_dg_tr]),
+                                        np.hstack([soup_d1_te, soup_d2_te,
+                                                   soup_gene_te, soup_cross_te,
+                                                   soup_dg_te])),
+    ]
+
+    print(f"\n  {'Config':35s} {'Feats':>6s}  {'R²':>8s}  {'MAE':>8s}  {'ΔR²':>8s}")
+    print(f"  {'-'*70}")
+    for label, Xtr_aug, Xte_aug in configs:
+        r2, mae = ridge_eval(Xtr_aug, y_tr, Xte_aug, y_test)
+        delta = r2 - r2_base
+        marker = " ***" if delta > 0.01 else ""
+        print(f"  {label:35s} {Xtr_aug.shape[1]:6d}  {r2:8.4f}  {mae:8.3f}  {delta:+8.4f}{marker}")
+
+
+if __name__ == "__main__":
+    main()

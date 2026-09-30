@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+artifacts/
+data/drugcomb/
+.venv-drugcomb/
+.venv/
+.DS_Store
+california_runs/

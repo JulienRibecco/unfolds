@@ -1,0 +1,185 @@
+{
+  "description": "Inner validation audit; final test entities never appear in development",
+  "config": {
+    "seed": 42,
+    "folds": 5,
+    "holdout_fraction": 0.2,
+    "candidates": [
+      "signal_only",
+      "signal_and_fingerprints"
+    ],
+    "selection_metric": "pooled OOF R2"
+  },
+  "data": {
+    "rows": 2000,
+    "entities": 40,
+    "dev_rows": 1600,
+    "test_rows": 400,
+    "dev_entities": 32,
+    "test_entities": 8
+  },
+  "environment": {
+    "python": "3.10.2",
+    "numpy": "2.2.6",
+    "scipy": "1.15.3",
+    "scikit-learn": "1.7.2"
+  },
+  "metadata": {
+    "dataset": "synthetic; not DrugComb measurements",
+    "generator": {
+      "entities": 40,
+      "rows_per_entity": 50,
+      "fingerprint_features": 60,
+      "signal_coefficient": 2,
+      "entity_offset_std": 3,
+      "noise_std": 0.5
+    },
+    "model": "Ridge(alpha=1.0), train-only imputation and standardization"
+  },
+  "protocols": {
+    "random_rows": {
+      "validation": {
+        "signal_only": {
+          "r2": 0.28009881246303625,
+          "mae": 2.5260344658819553
+        },
+        "signal_and_fingerprints": {
+          "r2": 0.9803960592089803,
+          "mae": 0.40325832559303865
+        }
+      },
+      "selected": "signal_and_fingerprints",
+      "shared_entities_per_inner_fold": [
+        32,
+        32,
+        32,
+        32,
+        32
+      ]
+    },
+    "grouped_entities": {
+      "validation": {
+        "signal_only": {
+          "r2": 0.21431171123465165,
+          "mae": 2.615237725968382
+        },
+        "signal_and_fingerprints": {
+          "r2": -0.781444746575422,
+          "mae": 3.927388016465236
+        }
+      },
+      "selected": "signal_only",
+      "shared_entities_per_inner_fold": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "final_test": {
+    "signal_only": {
+      "r2": 0.3364386806445151,
+      "mae": 2.1268636690762057,
+      "selected_features": [
+        "transferable_signal"
+      ]
+    },
+    "signal_and_fingerprints": {
+      "r2": -1.8116494538945904,
+      "mae": 3.896620441595312,
+      "selected_features": [
+        "transferable_signal",
+        "entity_measurement_00",
+        "entity_measurement_01",
+        "entity_measurement_02",
+        "entity_measurement_03",
+        "entity_measurement_04",
+        "entity_measurement_05",
+        "entity_measurement_06",
+        "entity_measurement_07",
+        "entity_measurement_08",
+        "entity_measurement_09",
+        "entity_measurement_10",
+        "entity_measurement_11",
+        "entity_measurement_12",
+        "entity_measurement_13",
+        "entity_measurement_14",
+        "entity_measurement_15",
+        "entity_measurement_16",
+        "entity_measurement_17",
+        "entity_measurement_18",
+        "entity_measurement_19",
+        "entity_measurement_20",
+        "entity_measurement_21",
+        "entity_measurement_22",
+        "entity_measurement_23",
+        "entity_measurement_24",
+        "entity_measurement_25",
+        "entity_measurement_26",
+        "entity_measurement_27",
+        "entity_measurement_28",
+        "entity_measurement_29",
+        "entity_measurement_30",
+        "entity_measurement_31",
+        "entity_measurement_32",
+        "entity_measurement_33",
+        "entity_measurement_34",
+        "entity_measurement_35",
+        "entity_measurement_36",
+        "entity_measurement_37",
+        "entity_measurement_38",
+        "entity_measurement_39",
+        "entity_measurement_40",
+        "entity_measurement_41",
+        "entity_measurement_42",
+        "entity_measurement_43",
+        "entity_measurement_44",
+        "entity_measurement_45",
+        "entity_measurement_46",
+        "entity_measurement_47",
+        "entity_measurement_48",
+        "entity_measurement_49",
+        "entity_measurement_50",
+        "entity_measurement_51",
+        "entity_measurement_52",
+        "entity_measurement_53",
+        "entity_measurement_54",
+        "entity_measurement_55",
+        "entity_measurement_56",
+        "entity_measurement_57",
+        "entity_measurement_58",
+        "entity_measurement_59"
+      ]
+    }
+  },
+  "baseline": "signal_only",
+  "elapsed_seconds": 0.07014350000099512,
+  "peak_process_rss_mib": 135.078125,
+  "artifacts": {
+    "file": "entity-validation.npz",
+    "sha256": "db57348cfadf7338a0b9bbe51b04034cb7c968b5cf0461cf5a9055f8b0462d3b"
+  },
+  "code_sha256": {
+    "examples/__init__.py": "ed6a80ddc27134ff15005c91b7eda505b0c80733590f52a6923e4b3a007fc817",
+    "examples/california_housing.py": "b040b3ee57607b0b45c3bd5ada96b12971229773ef6dd62639f0d9a31e97db07",
+    "examples/drugcomb/__init__.py": "8022724a7f6febd658d0773adeb344c74db5c86d500690547f089ed8d0216136",
+    "examples/drugcomb/audit.py": "1932b05c8c23e88d5a8de337132d43a714b1c5eb10ca81ee764361d7d5188484",
+    "examples/drugcomb/prepare.py": "1e2eb580f894176fe20c342140c01606b408a54a7c738c62835a4066a423439b",
+    "examples/entity_validation.py": "65e077224e21676798c6578f72d667bafdf10784732909eb61060ec5c76a27de",
+    "examples/validation_audit.py": "6402f3ade70be7c668d0f5a2be6fbc43c212004e4f6ee3369bc777d0eb014e08",
+    "unfolds/__init__.py": "faac30277febd7997b465056063e7bf80d351200a7fdf8874db1fd7397418394",
+    "unfolds/bench.py": "82b4696457c8563f6eb89966c5d679782d210b3947cccfccb77b8640ed6351a1",
+    "unfolds/cascade.py": "f8e63738dc3164e313504463b995d4984ebe2cf94c0403e0a27f35ffcd09063f",
+    "unfolds/data.py": "71f0cef674afeebd3fb3f234f8556f4037c8ac9c4cc7fc540fd446cc8d8db8e9",
+    "unfolds/experiment.py": "8c8da987f592b2ac1739d4b9124c100d4f8c831c3554a9496fd483c92975bd7b",
+    "unfolds/hint.py": "d70ea5a0023c5997c5ad7c1417a6694c56f7027935b726f253d358bf554291b9",
+    "unfolds/model.py": "12d7f2ee2c62033bd4e133f5b625bdc746b4fadad15ea2bfa694b540694a4904",
+    "unfolds/nn.py": "4626f432c9ca1188f7c2516143cc2ad1b5c4872e50ee8ca26e41bf404848b844",
+    "unfolds/pipeline.py": "03523f24f520ead4d378c307b188472c8f91d6c41c47080d99e343151c1bb23b",
+    "unfolds/ridge.py": "1c404386f0aae0f041cf1dc204403ed50a73ad505b5120a5d33468652608905b",
+    "unfolds/validate.py": "ae961552b897ac4bc3f420f0579a4ec8f3ad048fecd589a19edc3f53f36f8ba5"
+  },
+  "reference_note": "Aggregate reference report. Measurement-level NPZ artifacts are not committed; regenerate with the documented command."
+}
